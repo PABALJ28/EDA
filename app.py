@@ -65,6 +65,12 @@ div[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
     font-size: 0.84rem; font-weight: 600; color: #CED4DC;
     border-bottom: 1px solid #2D323A; padding-bottom: 4px; margin-bottom: 8px;
 }
+.hero-hdr {
+    font-size: 1.05rem; font-weight: 700; color: #FFFFFF;
+    background: linear-gradient(90deg, #1E293B 0%, #171B22 100%);
+    border-left: 4px solid #3EA843; border-top: 1px solid #2E3644; border-right: 1px solid #2E3644; border-bottom: 1px solid #2E3644;
+    padding: 10px 14px; margin-top: 6px; margin-bottom: 10px; border-radius: 3px;
+}
 </style>""", unsafe_allow_html=True)
 
 
@@ -97,6 +103,8 @@ if archivo is not None:
     contenido = archivo.getvalue()
 elif Path("Base_General.xlsx").exists():
     contenido = Path("Base_General.xlsx").read_bytes()
+elif Path("Base General.xlsx").exists():
+    contenido = Path("Base General.xlsx").read_bytes()
 elif Path("EDA.xlsx").exists():
     contenido = Path("EDA.xlsx").read_bytes()
 else:
@@ -223,6 +231,40 @@ def heat(piv, escala, titulo_cb):
     fig.update_layout(height=max(360, 18 * len(L) + 100), margin=dict(l=0, r=0, t=10, b=0))
     fig.update_yaxes(autorange="reversed")
     return fig
+
+
+def construir_tabla_referencia(umb_dict, especie_fe, especie_cu, especie_zn, usar_oxidos):
+    """Genera el cuadro de referencia con los valores mínimos minables y criterios de conversión activos."""
+    notas_especie = {
+        'Fe': f"Especie seleccionada: {especie_fe} (Opciones: Magnetita 20-30%, Goethita/Pirita 30-40%, Hematita/Limonita 40-50%)",
+        'Cu': f"Mena seleccionada: {especie_cu} (Opciones: Óxidos 0.3-0.6% Cu | Sulfuros 0.5-1.0% Cu)",
+        'Zn': f"Mena seleccionada: {especie_zn} (Opciones: Sulfuros 3-5% Zn | No sulfuros 10-15% Zn)",
+        'PGE': "Suma estequiométrica de Platinoides + Oro: Pt + Pd + Au (Rango ref.: 2 - 10 g/t)",
+        'REE': "Suma total de Tierras Raras Ligeras y Pesadas (Σ 16 elementos, Rango ref.: 0.1 - 0.2%)",
+        'Ga': "Subproducto crítico en menas de Zn / Al (Umbral industrial de recuperación secundaria)",
+        'Ge': "Subproducto crítico en sulfuros de Zn / Pb (Umbral industrial de recuperación secundaria)",
+        'In': "Subproducto crítico en menas polimetálicas Zn-Pb-Cu (Umbral industrial de recuperación secundaria)",
+    }
+    filas_ref = []
+    for el, (val_min, uni) in umb_dict.items():
+        es_ox = usar_oxidos and (el in core.FACTORES_OXIDO)
+        comp = core.etiqueta_elemento(el, usar_oxidos)
+        factor = core.FACTORES_OXIDO[el][1] if es_ox else 1.0
+        nom_doc = core.CRITICOS.get(el, (el, False, False, False))[0]
+        regla = (f"Conversión a óxido ({core.FACTORES_OXIDO[el][0]} = {el} × {factor:.4f})"
+                 if es_ox else "Concentración elemental directa")
+        if el in notas_especie:
+            regla = f"{regla} · {notas_especie[el]}"
+        filas_ref.append({
+            "Símbolo Base": el,
+            "Atributo Evaluado": f"{comp} ({uni})",
+            "Referencia Documental": nom_doc,
+            "Valor Mínimo Minable": val_min,
+            "Unidad": uni,
+            "Factor Gravimétrico": factor,
+            "Criterio Técnico / Regla de Conversión": regla
+        })
+    return pd.DataFrame(filas_ref)
 
 
 # ───────────── Navegación por Pestañas (Sin Emojis) ─────────────
@@ -358,7 +400,7 @@ with t2:
 # ═══ 3. MINERALES CRÍTICOS (Ga, Ge, In, U, Th, Ce, Nd, PGE, REE, Co, V, Ti, Cr) ═══
 with t8:
     st.markdown('<div class="panel-hdr">Evaluación de Materias Primas Críticas, Subproductos (Ga, Ge, In), Óxidos y Platinoides (Pt+Pd+Au)</div>', unsafe_allow_html=True)
-    st.caption("conversiones estequiométricas activas para: Al2O3, Cr2O3, TiO2, Li2O, WO3, BeO, CeO2, U3O8, ThO2 y Ta2O5. El Fósforo (700 ppm P) y el Vanadio (0.1% V) se evalúan en forma elemental directa conforme al documento técnico.")
+    st.caption("Conversiones estequiométricas activas para: Al2O3, Cr2O3, TiO2, Li2O, WO3, BeO, CeO2, U3O8, ThO2 y Ta2O5. El Fósforo (700 ppm P) y el Vanadio (0.1% V) se evalúan en forma elemental directa conforme al documento técnico.")
 
     sin_min = [e for e in core.CRITICOS if e not in umb_actual and e not in core.REE_IND and e in vals.columns]
     if sin_min:
@@ -543,32 +585,146 @@ with t5:
 
 # ═══ 8. DATOS Y EXPORTACIÓN ═══
 with t6:
-    st.markdown('<div class="panel-hdr">Resumen Ejecutivo por Sitio y Tipo de Depósito</div>', unsafe_allow_html=True)
-    cols = ["grupo", "estado", "municipio", "n", "pinta_lbl", "elementos_rentables", "nivel_tox", "excede_mx", "excede_eu"]
-    tabla = res[cols].rename(columns={
-        "pinta_lbl": "Potencial Económico", "elementos_rentables": "Elementos >= Corte",
-        "nivel_tox": "Estatus Ambiental", "excede_mx": "Excede NOM-147 (mg/kg)", "excede_eu": "Excede Ref. UE (mg/kg)"
-    })
-    st.dataframe(tabla, width="stretch", hide_index=True)
+    # Construcción de la matriz general y los umbrales por columna
+    mat_full = rmin.assign(col=rmin.etiqueta_elem + " (" + rmin.unidad + ")").pivot_table(index="grupo", columns="col", values="valor")
+    mapa_min_col = {
+        f"{r.etiqueta_elem} ({r.unidad})": r.minimo
+        for r in rmin[["etiqueta_elem", "unidad", "minimo"]].drop_duplicates().itertuples()
+    }
 
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        tabla.to_excel(xw, sheet_name="Resumen_Ejecutivo", index=False)
-        rmin.drop(columns=["gm_u", "media_u", "p1_u", "p2_u", "maximo_u"], errors="ignore").to_excel(xw, sheet_name="Evaluacion_Economica", index=False)
-        rtox.to_excel(xw, sheet_name="Evaluacion_Ambiental", index=False)
-    d1, d2 = st.columns(2)
-    d1.download_button("Descargar Resumen (CSV)", tabla.to_csv(index=False).encode("utf-8-sig"), "resumen_eda_sgm.csv", "text/csv")
-    d2.download_button("Descargar Reporte Completo (Excel)", buf.getvalue(), "reporte_geoquimico_eulacrm.xlsx")
+    # Identificación de columnas de interés (aquellas que existen y donde al menos un sitio alcanza >= ley de corte)
+    cols_con_corte = [
+        cn for cn in mat_full.columns
+        if (mat_full[cn].notna().any()) and (mat_full[cn] >= mapa_min_col.get(cn, np.inf)).any()
+    ]
+    cols_Descartadas = [cn for cn in mat_full.columns if cn not in cols_con_corte]
 
-    with st.expander("Matriz de concentraciones medias convertidas (Verde >= Ley de Corte | Rojo < Ley de Corte)", expanded=True):
-        mat = rmin.assign(col=rmin.etiqueta_elem + " (" + rmin.unidad + ")").pivot_table(index="grupo", columns="col", values="valor")
-        mapa_min_col = {f"{r.etiqueta_elem} ({r.unidad})": r.minimo for r in rmin[["etiqueta_elem", "unidad", "minimo"]].drop_duplicates().itertuples()}
-        sty = mat.style
-        for cn in mat.columns:
+    # ── 1. TABLA PRINCIPAL (GRANDE ARRIBA): MATRIZ FINAL DEPURADA DE ATRIBUTOS DE INTERÉS ──
+    st.markdown(
+        '<div class="hero-hdr">RESULTADO FINAL · Matriz Depurada de Elementos y Óxidos con Potencial Económico (>= Ley de Corte)</div>',
+        unsafe_allow_html=True
+    )
+    f_dep1, f_dep2 = st.columns([1.8, 2.2])
+    solo_filas_pinta = f_dep1.checkbox(
+        "Mostrar únicamente sitios que superan al menos una ley de corte",
+        value=True,
+        help="Filtra también las filas para dejar exclusivamente los sitios y depósitos con viabilidad económica."
+    )
+    f_dep2.markdown(
+        f'<div style="padding-top:6px;font-size:0.80rem;color:#A6ADB7;">'
+        f'<b>Atributos activos con potencial:</b> {len(cols_con_corte)} de {len(mat_full.columns)} evaluados &nbsp;|&nbsp; '
+        f'<b>Atributos depurados (sin corte / sin dato):</b> {len(cols_Descartadas)}'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
+    if cols_con_corte:
+        mat_dep = mat_full[cols_con_corte].copy()
+        if solo_filas_pinta:
+            mask_filas = pd.Series(False, index=mat_dep.index)
+            for cn in mat_dep.columns:
+                mask_filas |= (mat_dep[cn] >= mapa_min_col.get(cn, np.inf))
+            mat_dep = mat_dep[mask_filas]
+
+        # Agregar metadatos clave de contexto (Estado, Municipio, n) al inicio de la matriz depurada
+        meta_Idx = res.set_index("grupo")[["estado", "municipio", "n"]].rename(
+            columns={"estado": "Estado", "municipio": "Municipio", "n": "Muestras (n)"}
+        )
+        mat_dep_vista = meta_Idx.loc[mat_dep.index].join(mat_dep)
+        mat_dep_vista.index.name = "Sitio · Tipo de Depósito"
+
+        sty_dep = mat_dep_vista.style
+        for cn in cols_con_corte:
             u_min = mapa_min_col.get(cn, np.nan)
-            sty = sty.map(
+            sty_dep = sty_dep.map(
+                lambda v, u=u_min: "background-color:#1B1E24;color:#5A626E" if pd.isna(v) else
+                ("background-color:#194D28;color:#D4F7DC;font-weight:bold" if v >= u else "background-color:#381A1E;color:#E2A6AE"),
+                subset=[cn]
+            )
+        fmt_dict = {cn: "{:.3g}" for cn in cols_con_corte}
+        fmt_dict["Muestras (n)"] = "{:.0f}"
+        altura_dep = min(780, max(320, 36 * len(mat_dep_vista) + 60))
+        st.dataframe(sty_dep.format(fmt_dict, na_rep="—"), width="stretch", height=altura_dep)
+        if cols_Descartadas:
+            st.caption("Atributos depurados automáticamente (ningún sitio alcanza la ley de corte o carecen de lecturas >LD): " + ", ".join(cols_Descartadas) + ".")
+    else:
+        mat_dep_vista = pd.DataFrame()
+        st.info("Ningún atributo alcanza los valores mínimos minables con los filtros actuales.")
+
+    st.write("")
+
+    # ── 2. TABLA CONTEXTUAL DE VALORES MÍNIMOS MINABLES POR ELEMENTO ──
+    st.markdown(
+        '<div class="panel-hdr">Tabla de Contextualización · Valores Mínimos Minables y Reglas Estequiométricas por Elemento</div>',
+        unsafe_allow_html=True
+    )
+    df_ref_cortes = construir_tabla_referencia(umb_actual, especie_fe, especie_cu, especie_zn, usar_oxidos)
+    df_ref_cortes["Estado en Selección"] = np.where(
+        df_ref_cortes["Atributo Evaluado"].isin(cols_con_corte),
+        "Activo (>= Corte en sitios)",
+        "Depurado (< Corte / Sin dato)"
+    )
+    sty_ref = df_ref_cortes.style.map(
+        lambda v: "background-color:#194D28;color:#D4F7DC;font-weight:bold" if v == "Activo (>= Corte en sitios)"
+        else "background-color:#262A32;color:#8F96A0",
+        subset=["Estado en Selección"]
+    ).format({"Valor Mínimo Minable": "{:.4g}", "Factor Gravimétrico": "{:.4f}"})
+    st.dataframe(sty_ref, width="stretch", hide_index=True, height=420)
+
+    st.write("")
+
+    # ── 3. MATRIZ COMPLETA (SIN DEPURAR) Y RESUMEN EJECUTIVO ──
+    with st.expander("Matriz completa de concentraciones medias convertidas (Todos los atributos · Verde >= Ley de Corte | Rojo < Ley de Corte)", expanded=False):
+        sty_full = mat_full.style
+        for cn in mat_full.columns:
+            u_min = mapa_min_col.get(cn, np.nan)
+            sty_full = sty_full.map(
                 lambda v, u=u_min: "background-color:#262A32;color:#78808C" if pd.isna(v) else
                 ("background-color:#194D28;color:#D4F7DC;font-weight:bold" if v >= u else "background-color:#4A1C1C;color:#FAD2D2"),
                 subset=[cn]
             )
-        st.dataframe(sty.format("{:.3g}"), width="stretch")
+        st.dataframe(sty_full.format("{:.3g}", na_rep="—"), width="stretch", height=480)
+
+    with st.expander("Resumen Ejecutivo por Sitio y Tipo de Depósito (Económico y Ambiental)", expanded=False):
+        cols = ["grupo", "estado", "municipio", "n", "pinta_lbl", "elementos_rentables", "nivel_tox", "excede_mx", "excede_eu"]
+        tabla = res[cols].rename(columns={
+            "pinta_lbl": "Potencial Económico", "elementos_rentables": "Elementos >= Corte",
+            "nivel_tox": "Estatus Ambiental", "excede_mx": "Excede NOM-147 (mg/kg)", "excede_eu": "Excede Ref. UE (mg/kg)"
+        })
+        st.dataframe(tabla, width="stretch", hide_index=True)
+
+    # Preparar exportación integral en Excel y CSV
+    cols_res = ["grupo", "estado", "municipio", "n", "pinta_lbl", "elementos_rentables", "nivel_tox", "excede_mx", "excede_eu"]
+    tabla = res[cols_res].rename(columns={
+        "pinta_lbl": "Potencial Económico", "elementos_rentables": "Elementos >= Corte",
+        "nivel_tox": "Estatus Ambiental", "excede_mx": "Excede NOM-147 (mg/kg)", "excede_eu": "Excede Ref. UE (mg/kg)"
+    })
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        if not mat_dep_vista.empty:
+            mat_dep_vista.reset_index().to_excel(xw, sheet_name="Matriz_Final_Depurada", index=False)
+        df_ref_cortes.to_excel(xw, sheet_name="Valores_Minimos_Minables", index=False)
+        mat_full.reset_index().to_excel(xw, sheet_name="Matriz_Completa_Medias", index=False)
+        tabla.to_excel(xw, sheet_name="Resumen_Ejecutivo", index=False)
+        rmin.drop(columns=["gm_u", "media_u", "p1_u", "p2_u", "maximo_u"], errors="ignore").to_excel(xw, sheet_name="Evaluacion_Economica", index=False)
+        rtox.to_excel(xw, sheet_name="Evaluacion_Ambiental", index=False)
+
+    d1, d2, d3 = st.columns(3)
+    if not mat_dep_vista.empty:
+        d1.download_button(
+            "Descargar Matriz Depurada (CSV)",
+            mat_dep_vista.reset_index().to_csv(index=False).encode("utf-8-sig"),
+            "matriz_final_depurada_sgm.csv",
+            "text/csv"
+        )
+    d2.download_button(
+        "Descargar Valores Mínimos (CSV)",
+        df_ref_cortes.to_csv(index=False).encode("utf-8-sig"),
+        "valores_minimos_minables.csv",
+        "text/csv"
+    )
+    d3.download_button(
+        "Descargar Reporte Completo (Excel)",
+        buf.getvalue(),
+        "reporte_geoquimico_eulacrm.xlsx"
+    )
