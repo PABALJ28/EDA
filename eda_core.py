@@ -126,8 +126,16 @@ def _num(serie):
     return num.where(~cens, num / 2.0), cens, num.where(cens)
 
 
-def _col(df, clave):
-    return next(c for c in df.columns if clave.lower() in c[0].lower())
+def _col_opt(df, claves):
+    """Busca una columna en ambos niveles del MultiIndex usando una lista de posibles nombres."""
+    if isinstance(claves, str):
+        claves = [claves]
+    for k in claves:
+        kl = k.lower()
+        for c in df.columns:
+            if kl in str(c[0]).lower() or kl in str(c[1]).lower():
+                return c
+    return None
 
 
 def _leer_hoja(xls, hoja):
@@ -142,31 +150,58 @@ def cargar_base(contenido: bytes):
     hojas = [h for h in xls.sheet_names if "LREE" not in h.upper() and "AVALOS" not in h.upper()]
     if not hojas:
         hojas = [h for h in xls.sheet_names if "LREE" not in h.upper()]
-    if "Base general" in hojas:
-        hojas = ["Base general"]
+    if not hojas:
+        hojas = list(xls.sheet_names[:1])
+    for nombre_base in ("Base general", "Base General", "Base_General"):
+        if nombre_base in hojas:
+            hojas = [nombre_base]
+            break
     raw = pd.concat([_leer_hoja(xls, h) for h in hojas], ignore_index=True)
 
-    c_x = next(c for c in raw.columns if c[1] == "X")
-    c_y = next(c for c in raw.columns if c[1] == "Y")
-    txt = lambda k: raw[_col(raw, k)].astype("string").str.strip()
+    c_x = next((c for c in raw.columns if c[1].upper() in ("X", "ESTE", "X_UTM", "UTM_X") or c[0].upper() in ("X", "ESTE", "X_UTM")), None)
+    c_y = next((c for c in raw.columns if c[1].upper() in ("Y", "NORTE", "Y_UTM", "UTM_Y") or c[0].upper() in ("Y", "NORTE", "Y_UTM")), None)
+
+    def txt(claves, default="Sin dato"):
+        col = _col_opt(raw, claves)
+        if col is None:
+            return pd.Series([default] * len(raw), index=raw.index, dtype="string")
+        s = raw[col]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        return s.astype("string").str.strip()
+
+    def num_col(claves):
+        col = _col_opt(raw, claves)
+        if col is None:
+            return pd.Series(np.nan, index=raw.index, dtype=float)
+        s = raw[col]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        return pd.to_numeric(s, errors="coerce")
+
+    s_clave = txt(["Clave", "ID", "Muestra", "Codigo", "Código"], default="")
+    s_clave = s_clave.where(s_clave.notna() & (s_clave != ""), pd.Series([f"M-{i+1}" for i in range(len(raw))], index=raw.index, dtype="string"))
+
     meta = pd.DataFrame({
-        "clave": txt("Clave"),
-        "zona": pd.to_numeric(raw[_col(raw, "Zona")], errors="coerce").ffill(),
-        "x": pd.to_numeric(raw[c_x], errors="coerce").ffill(),
-        "y": pd.to_numeric(raw[c_y], errors="coerce").ffill(),
-        "estado": txt("Estado").ffill(),
-        "municipio": txt("Municipio").ffill(),
-        "sitio": txt("Sitio").ffill(),
-        "interes": txt("Elementos de").ffill(),
-        "tipo": txt("Tipo de muestra").ffill(),
+        "clave": s_clave,
+        "zona": num_col(["Zona", "Zona UTM", "Zone"]).ffill(),
+        "x": (pd.to_numeric(raw[c_x], errors="coerce").ffill() if c_x is not None else pd.Series(np.nan, index=raw.index)),
+        "y": (pd.to_numeric(raw[c_y], errors="coerce").ffill() if c_y is not None else pd.Series(np.nan, index=raw.index)),
+        "estado": txt(["Estado", "Entidad"], default="General").ffill().fillna("General"),
+        "municipio": txt(["Municipio", "Localidad"], default="Sin especificar").ffill().fillna("Sin especificar"),
+        "sitio": txt(["Sitio", "Proyecto", "Mina", "Localidad", "Area", "Área"], default="Sitio General").ffill().fillna("Sitio General"),
+        "interes": txt(["Elementos de", "Interés", "Interes", "Asociación", "Asociacion", "Target"], default="No especificado").ffill().fillna("No especificado"),
+        "tipo": txt(["Tipo de muestra", "Tipo", "Depósito", "Deposito", "Material", "Matriz"], default="Muestra").ffill().fillna("Muestra"),
     })
     meta["es_dpl"] = meta.clave.str.contains("DPL", case=False).fillna(False).astype(bool)
     meta["clave_base"] = meta.clave.str.replace(r"(?i)[-_ ]*DPL$", "", regex=True)
     meta["grupo"] = meta.sitio + " · " + meta.tipo
-    med = [c for c in raw.columns if c[0].startswith("Medidas")]
+    med = [c for c in raw.columns if c[0].lower().startswith("medida") or c[0].lower().startswith("dimensi")]
+    for nom in ("L", "W", "H"):
+        meta[nom] = np.nan
     for nom, cc in zip(["L", "W", "H"], med[:3]):
         meta[nom] = pd.to_numeric(raw[cc], errors="coerce")
-    es_terr = (meta.tipo == "Terreros").to_numpy()
+    es_terr = meta.tipo.str.contains("Terrero", case=False, na=False).to_numpy()
     meta["terrero"] = (meta.L.notna() & es_terr).groupby(meta.sitio).cumsum().where(es_terr, 0).astype(int)
     meta["vol_m3"] = (meta.L * meta.W * meta.H).where(es_terr)
     n_terr = meta.groupby("sitio").terrero.transform("max")
@@ -174,9 +209,14 @@ def cargar_base(contenido: bytes):
 
     lat, lon = np.full(len(meta), np.nan), np.full(len(meta), np.nan)
     for z in meta.zona.dropna().unique():
-        m = ((meta.zona == z) & meta.x.notna() & meta.y.notna()).to_numpy()
-        t = Transformer.from_crs(f"EPSG:{32600 + int(z)}", "EPSG:4326", always_xy=True)
-        lon[m], lat[m] = t.transform(meta.x[m].to_numpy(), meta.y[m].to_numpy())
+        try:
+            z_int = int(z)
+            if 1 <= z_int <= 60:
+                m = ((meta.zona == z) & meta.x.notna() & meta.y.notna()).to_numpy()
+                t = Transformer.from_crs(f"EPSG:{32600 + z_int}", "EPSG:4326", always_xy=True)
+                lon[m], lat[m] = t.transform(meta.x[m].to_numpy(), meta.y[m].to_numpy())
+        except Exception:
+            pass
     meta["lat"], meta["lon"] = lat, lon
 
     vals, cens, ld, au = {}, {}, {}, []
@@ -207,7 +247,6 @@ def cargar_base(contenido: bytes):
     cols_pge = [e for e in COMPONENTES_PGE if e in vals]
     if cols_pge:
         vals["PGE"] = vals[cols_pge].fillna(0).sum(axis=1)
-        # Hereda el porcentaje de censura del componente principal disponible (ej. Au si Pt y Pd no están)
         if "Au" in cens and len(cols_pge) == 1:
             cens["PGE"] = cens["Au"]
         else:
@@ -391,7 +430,6 @@ CRITICOS = {
 }
 PRIORITARIOS_PROYECTO = {'Co', 'Cr', 'Ga', 'Ge', 'In', 'Ti', 'V', 'Ce', 'Nd', 'As', 'REE', 'U', 'Th', 'PGE', 'Li', 'Nb', 'Ta'}
 HOSTS = ['Au', 'Ag', 'Cu', 'Pb', 'Zn']
-# Ce y Nd tienen ley de corte individual en el documento de referencia, por lo que sí se evalúan individualmente
 REE_IND = [e for e in TIERRAS_RARAS if e not in ('Sc', 'Ce', 'Nd')]
 CRITICOS_SIN_DATO = ['Li (0.6% Li2O)', 'Nb (0.1% Nb)', 'Ta (0.02% Ta2O5)', 'Pt y Pd (en PGE)', 'Barita (4.2-4.5 g/cm3, densidad)']
 
