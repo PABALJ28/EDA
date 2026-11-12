@@ -1,6 +1,6 @@
-streamlit>=1.50
-pandas
-numpy
-plotly>=6.0
-pyproj
-openpyxl
+streamlit>=1.38.0
+pandas>=2.2.0
+numpy>=1.26.0
+plotly>=5.22.0
+pyproj>=3.6.0
+openpyxl>=3.1.2
