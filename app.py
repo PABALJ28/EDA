@@ -97,7 +97,7 @@ st.markdown(
 # ───────────── Carga de Archivo ─────────────
 with st.sidebar:
     st.markdown('<div class="panel-hdr">Origen de Datos</div>', unsafe_allow_html=True)
-    archivo = st.file_uploader("Cargar Base General (Excel)", type=["xlsx"])
+    archivo = st.file_uploader("Cargar Base Geoquímica (Excel / CSV)", type=["xlsx", "xls", "csv"])
 
 if archivo is not None:
     contenido = archivo.getvalue()
@@ -108,7 +108,7 @@ elif Path("Base General.xlsx").exists():
 elif Path("EDA.xlsx").exists():
     contenido = Path("EDA.xlsx").read_bytes()
 else:
-    st.info("Cargue el archivo Excel de la Base General en el panel lateral para iniciar el análisis.")
+    st.info("Cargue el archivo Excel o CSV de la base geoquímica en el panel lateral para iniciar el análisis.")
     st.stop()
 
 
@@ -203,6 +203,16 @@ muestras["pinta_lbl"] = np.where(muestras.pinta, "Pinta (>= minimo)", "No pinta"
 # ───────────── Funciones de Graficación ─────────────
 def mapa(df, base, **kw):
     d = df.dropna(subset=["lat", "lon"])
+    if d.empty:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Base de datos sin coordenadas válidas (UTM / Lat-Lon) para despliegue cartográfico",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
+            font=dict(size=13, color="#8F96A0")
+        )
+        fig.update_layout(height=430, margin=dict(l=0, r=0, t=0, b=0),
+                          xaxis=dict(visible=False), yaxis=dict(visible=False))
+        return fig
     fig = px.scatter_map(d, lat="lat", lon="lon", height=430, **kw)
     span = max(d.lat.max() - d.lat.min(), (d.lon.max() - d.lon.min()) * 0.9, 0.02)
     zoom = float(np.clip(np.log2(422 / span) - 0.3, 3, 14))
@@ -276,7 +286,7 @@ t1, t2, t8, t3, t4, t7, t5, t6 = st.tabs([
 # ═══ 1. GENERAL (Layout estilo Monitor SEGEMAR / EULACRM) ═══
 with t1:
     prim = meta_f[~meta_f.es_dpl]
-    pct_completitud = (1.0 - (est_ev.estatus == "Descartado").mean()) * 100
+    pct_completitud = (1.0 - (est_ev.estatus == "Descartado").mean()) * 100 if not est_ev.empty else 100.0
 
     col_left, col_mid, col_right = st.columns([1.1, 2.3, 2.6])
 
@@ -345,9 +355,10 @@ with t1:
     n_nom = int((res.nivel_tox == "Supera NOM-147 (MX)").sum())
     n_eu = int((res.nivel_tox == "Supera ref. europea").sum())
     n_terr_vol = int(res.vol_m3.notna().sum())
+    n_crit = int((rmin[rmin.elemento.isin(core.PRIORITARIOS_PROYECTO)].razon >= 1).groupby(rmin.grupo).any().sum()) if not rmin.empty else 0
 
     kpi_box(b_k1, "Unidades que cumplen corte", f"{n_rent}", f"{res.pinta.mean():.0%} de {len(res)} grupos", GREEN)
-    kpi_box(b_k2, "Unidades con mineral crítico", f"{int((rmin[rmin.elemento.isin(core.PRIORITARIOS_PROYECTO)].razon >= 1).groupby(rmin.grupo).any().sum())}", "Superan ley mínima", "#FFFFFF")
+    kpi_box(b_k2, "Unidades con mineral crítico", f"{n_crit}", "Superan ley mínima", "#FFFFFF")
     kpi_box(b_k3, "Exceden límite NOM-147", f"{n_nom} de {len(res)}", f"+{n_eu} superan ref. europea", AMBER if n_nom == 0 else RED)
     kpi_box(b_k4, "Terreros con cubicación", f"{n_terr_vol}", f"Volumen total: {res.vol_m3.sum():,.0f} m3", AMBER)
     kpi_box(b_k5, "Pares de control (-DPL)", f"{int(meta_f.es_dpl.sum())}", "Control de calidad QA/QC", "#FFFFFF")
@@ -355,47 +366,52 @@ with t1:
 # ═══ 2. GEOLOGÍA ECONÓMICA ═══
 with t2:
     elems = [e for e in umb_actual if e in rmin.elemento.unique()]
-    c_sel1, c_sel2 = st.columns([1, 2])
-    el = c_sel1.selectbox("Seleccionar elemento o compuesto", elems, index=elems.index("Pb") if "Pb" in elems else 0, key="el_min")
-    d = rmin[(rmin.elemento == el) & rmin.razon.notna()].sort_values("razon")
-    u, mn = umb_actual[el][1], umb_actual[el][0]
-    etiq = core.etiqueta_elemento(el, usar_oxidos)
-    c_sel2.markdown(
-        f'<div style="padding-top:28px;font-size:0.85rem;color:#B0B7C0;">'
-        f'<b>Evaluación actual:</b> {etiq} &nbsp;|&nbsp; <b>Umbral mínimo minable:</b> {mn} {u} '
-        f'{"(Convertido a óxido por factor " + str(core.FACTORES_OXIDO[el][1]) + ")" if (usar_oxidos and el in core.FACTORES_OXIDO) else ""}'
-        f'</div>',
-        unsafe_allow_html=True
-    )
+    if not elems:
+        st.info("La base cargada no contiene elementos con umbral mínimo minable predefinido.")
+    else:
+        c_sel1, c_sel2 = st.columns([1, 2])
+        el = c_sel1.selectbox("Seleccionar elemento o compuesto", elems, index=elems.index("Pb") if "Pb" in elems else 0, key="el_min")
+        d = rmin[(rmin.elemento == el) & rmin.razon.notna()].sort_values("razon")
+        u, mn = umb_actual[el][1], umb_actual[el][0]
+        etiq = core.etiqueta_elemento(el, usar_oxidos)
+        c_sel2.markdown(
+            f'<div style="padding-top:28px;font-size:0.85rem;color:#B0B7C0;">'
+            f'<b>Evaluación actual:</b> {etiq} &nbsp;|&nbsp; <b>Umbral mínimo minable:</b> {mn} {u} '
+            f'{"(Convertido a óxido por factor " + str(core.FACTORES_OXIDO[el][1]) + ")" if (usar_oxidos and el in core.FACTORES_OXIDO) else ""}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
 
-    m1, m2 = st.columns(2)
-    with m1:
-        st.markdown(f'<div class="panel-hdr">{etiq}: Promedio del sitio entre mínimo minable ({mn} {u})</div>', unsafe_allow_html=True)
-        fig = go.Figure()
-        fig.add_bar(y=d.grupo, x=d.razon, orientation="h", name="Promedio", marker_color=np.where(d.razon >= 1, GREEN, "#3A424E"))
-        fig.add_vline(x=1, line_dash="dash", line_color="#FFFFFF")
-        fig.update_xaxes(type="log", title="Razón respecto al mínimo minable (escala log)")
-        fig.update_layout(height=max(400, 20 * len(d) + 100), margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig, width="stretch")
-    with m2:
-        st.markdown(f'<div class="panel-hdr">Distribución espacial de {etiq}</div>', unsafe_allow_html=True)
-        dm = d.merge(res[["grupo", "lat", "lon"]], on="grupo")
-        dm["log_razon"] = np.log10(dm.razon)
-        fig = mapa(dm, base_mapa, color="log_razon", color_continuous_scale=ESC_ECON, range_color=(-2, 2),
-                   size="n", size_max=20, hover_name="grupo",
-                   hover_data={"valor": ":.3f", "razon": ":.2f", "pct_sobre_min": ":.0%", "n": True,
-                               "log_razon": False, "lat": False, "lon": False})
-        fig.update_coloraxes(colorbar=dict(title="", **ESC_TICKS))
-        st.plotly_chart(fig, width="stretch")
+        m1, m2 = st.columns(2)
+        with m1:
+            st.markdown(f'<div class="panel-hdr">{etiq}: Promedio del sitio entre mínimo minable ({mn} {u})</div>', unsafe_allow_html=True)
+            fig = go.Figure()
+            fig.add_bar(y=d.grupo, x=d.razon, orientation="h", name="Promedio", marker_color=np.where(d.razon >= 1, GREEN, "#3A424E"))
+            fig.add_vline(x=1, line_dash="dash", line_color="#FFFFFF")
+            fig.update_xaxes(type="log", title="Razón respecto al mínimo minable (escala log)")
+            fig.update_layout(height=max(400, 20 * len(d) + 100), margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig, width="stretch")
+        with m2:
+            st.markdown(f'<div class="panel-hdr">Distribución espacial de {etiq}</div>', unsafe_allow_html=True)
+            dm = d.merge(res[["grupo", "lat", "lon"]], on="grupo")
+            dm["log_razon"] = np.log10(dm.razon.where(dm.razon > 0))
+            fig = mapa(dm, base_mapa, color="log_razon", color_continuous_scale=ESC_ECON, range_color=(-2, 2),
+                       size="n", size_max=20, hover_name="grupo",
+                       hover_data={"valor": ":.3f", "razon": ":.2f", "pct_sobre_min": ":.0%", "n": True,
+                                   "log_razon": False, "lat": False, "lon": False})
+            fig.update_coloraxes(colorbar=dict(title="", **ESC_TICKS))
+            st.plotly_chart(fig, width="stretch")
 
-    st.markdown('<div class="panel-hdr">Matriz de calor: Sitios por Elementos / Óxidos (Razón sobre umbral mínimo)</div>', unsafe_allow_html=True)
-    st.plotly_chart(heat(rmin.pivot_table(index="grupo", columns="etiqueta_elem", values="razon"), ESC_ECON, ""), width="stretch")
+        st.markdown('<div class="panel-hdr">Matriz de calor: Sitios por Elementos / Óxidos (Razón sobre umbral mínimo)</div>', unsafe_allow_html=True)
+        piv_econ = rmin.pivot_table(index="grupo", columns="etiqueta_elem", values="razon")
+        if not piv_econ.empty:
+            st.plotly_chart(heat(piv_econ, ESC_ECON, ""), width="stretch")
 
-    st.markdown('<div class="panel-hdr">Contraste de elementos declarados contra leyes confirmadas</div>', unsafe_allow_html=True)
-    cmp_ = res[["grupo", "n", "declarados", "elementos_rentables", "no_declarados", "sin_confirmar"]].rename(columns={
-        "declarados": "Elementos de interés (declarados)", "elementos_rentables": "Confirmados >= mínimo",
-        "no_declarados": "Hallazgos adicionales (no declarados)", "sin_confirmar": "Declarados bajo umbral"})
-    st.dataframe(cmp_, width="stretch", hide_index=True)
+        st.markdown('<div class="panel-hdr">Contraste de elementos declarados contra leyes confirmadas</div>', unsafe_allow_html=True)
+        cmp_ = res[["grupo", "n", "declarados", "elementos_rentables", "no_declarados", "sin_confirmar"]].rename(columns={
+            "declarados": "Elementos de interés (declarados)", "elementos_rentables": "Confirmados >= mínimo",
+            "no_declarados": "Hallazgos adicionales (no declarados)", "sin_confirmar": "Declarados bajo umbral"})
+        st.dataframe(cmp_, width="stretch", hide_index=True)
 
 # ═══ 3. MINERALES CRÍTICOS (Ga, Ge, In, U, Th, Ce, Nd, PGE, REE, Co, V, Ti, Cr) ═══
 with t8:
@@ -435,20 +451,21 @@ with t8:
             "Sitios >= Umbral": rc[(rc.elemento == e) & (rc.razon >= 1)].grupo.nunique() if e in minimos else np.nan
         })
     tc = pd.DataFrame(filas)
-    vista = st.radio("Filtro de catálogo", ["Todos", "Prioritarios del Proyecto (Ga, Ge, In, U, Th, Ce, Nd, PGE, REE, Co, Cr, Ti, V)", "Estratégicos UE", "Con ley de corte activa"], horizontal=True)
-    if vista.startswith("Prioritarios"):
-        tc = tc[tc["Prioritario Proyecto"] == "Sí"]
-    elif vista == "Estratégicos UE":
-        tc = tc[tc["UE Estratégica"] == "Sí"]
-    elif vista == "Con ley de corte activa":
-        tc = tc[tc["Umbral Corte (ppm)"].notna()]
+    if not tc.empty:
+        vista = st.radio("Filtro de catálogo", ["Todos", "Prioritarios del Proyecto (Ga, Ge, In, U, Th, Ce, Nd, PGE, REE, Co, Cr, Ti, V)", "Estratégicos UE", "Con ley de corte activa"], horizontal=True)
+        if vista.startswith("Prioritarios"):
+            tc = tc[tc["Prioritario Proyecto"] == "Sí"]
+        elif vista == "Estratégicos UE":
+            tc = tc[tc["UE Estratégica"] == "Sí"]
+        elif vista == "Con ley de corte activa":
+            tc = tc[tc["Umbral Corte (ppm)"].notna()]
 
-    st.dataframe(tc, width="stretch", hide_index=True, column_config={
-        "% < LD": st.column_config.NumberColumn(format="%.1f %%"),
-        "Promedio (ppm)": st.column_config.NumberColumn(format="%.2f"),
-        "Máximo (ppm)": st.column_config.NumberColumn(format="%.2f"),
-        "Umbral Corte (ppm)": st.column_config.NumberColumn(format="%.4g")
-    })
+        st.dataframe(tc, width="stretch", hide_index=True, column_config={
+            "% < LD": st.column_config.NumberColumn(format="%.1f %%"),
+            "Promedio (ppm)": st.column_config.NumberColumn(format="%.2f"),
+            "Máximo (ppm)": st.column_config.NumberColumn(format="%.2f"),
+            "Umbral Corte (ppm)": st.column_config.NumberColumn(format="%.4g")
+        })
     st.caption("Parámetros del documento de referencia ausentes en las columnas analíticas actuales del Excel: " + ", ".join(core.CRITICOS_SIN_DATO) + ".")
 
     st.markdown('<div class="panel-hdr">Matriz comparativa de elementos críticos por sitio</div>', unsafe_allow_html=True)
@@ -457,28 +474,30 @@ with t8:
     defecto = [e for e in ["Ga", "Ge", "In", "U", "Th", "Ce", "Nd", "PGE", "REE", "Co", "Cr", "Ti", "V", "Sb", "W", "Be", "Mn", "Ni", "Cu", "As", "Bi", "Sc"] if e in disp]
     sel_c = st.multiselect("Seleccionar elementos críticos", disp, default=defecto)
     sub = rc[rc.elemento.isin(sel_c)].copy()
-    sub["etiqueta"] = sub.elemento.map(lambda e: core.etiqueta_elemento(e, usar_oxidos))
-    if modo.startswith("Razón"):
-        piv = sub.pivot_table(index="grupo", columns="etiqueta", values="razon").dropna(axis=1, how="all")
-        if not piv.empty:
-            st.plotly_chart(heat(piv, ESC_ECON, ""), width="stretch")
-    else:
-        pv = sub.pivot_table(index="grupo", columns="etiqueta", values="percentil")
-        fig = go.Figure(go.Heatmap(
-            z=pv.values, x=pv.columns, y=pv.index, zmin=0, zmax=100, xgap=1, ygap=1,
-            colorscale=[[0, "#181B20"], [0.6, "#2C3540"], [0.85, GREEN], [1, AMBER]],
-            colorbar=dict(title="Percentil"), hovertemplate="%{y}<br>%{x}: percentil %{z:.0f}<extra></extra>"
-        ))
-        fig.update_layout(height=max(360, 18 * len(pv) + 100), margin=dict(l=0, r=0, t=10, b=0))
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, width="stretch")
+    if not sub.empty:
+        sub["etiqueta"] = sub.elemento.map(lambda e: core.etiqueta_elemento(e, usar_oxidos))
+        if modo.startswith("Razón"):
+            piv = sub.pivot_table(index="grupo", columns="etiqueta", values="razon").dropna(axis=1, how="all")
+            if not piv.empty:
+                st.plotly_chart(heat(piv, ESC_ECON, ""), width="stretch")
+        else:
+            pv = sub.pivot_table(index="grupo", columns="etiqueta", values="percentil")
+            if not pv.empty:
+                fig = go.Figure(go.Heatmap(
+                    z=pv.values, x=pv.columns, y=pv.index, zmin=0, zmax=100, xgap=1, ygap=1,
+                    colorscale=[[0, "#181B20"], [0.6, "#2C3540"], [0.85, GREEN], [1, AMBER]],
+                    colorbar=dict(title="Percentil"), hovertemplate="%{y}<br>%{x}: percentil %{z:.0f}<extra></extra>"
+                ))
+                fig.update_layout(height=max(360, 18 * len(pv) + 100), margin=dict(l=0, r=0, t=10, b=0))
+                fig.update_yaxes(autorange="reversed")
+                st.plotly_chart(fig, width="stretch")
 
     st.markdown('<div class="panel-hdr">Asociación Metalúrgica: Metales principales (Au, Ag, Cu, Pb, Zn) y subproductos críticos</div>', unsafe_allow_html=True)
-    paga = rmin[(rmin.razon >= 1) & rmin.elemento.isin(core.HOSTS)].groupby("grupo").etiqueta_elem.agg(lambda s: ", ".join(sorted(s)))
-    crit_min = rc[(rc.razon >= 1) & ~rc.elemento.isin(core.HOSTS)]
-    sin_m = rc[rc.min_ppm.isna() & (rc.percentil >= 90) & ~rc.elemento.isin(core.REE_IND) & ~rc.elemento.isin(core.HOSTS)]
-    a_ = crit_min.groupby("grupo").elemento.agg(lambda s: ", ".join(sorted(core.etiqueta_elemento(x, usar_oxidos) for x in s)))
-    b_ = sin_m.groupby("grupo").elemento.agg(lambda s: ", ".join(sorted(core.etiqueta_elemento(x, usar_oxidos) for x in s)))
+    paga = rmin[(rmin.razon >= 1) & rmin.elemento.isin(core.HOSTS)].groupby("grupo").etiqueta_elem.agg(lambda s: ", ".join(sorted(s))) if not rmin.empty else pd.Series(dtype=str)
+    crit_min = rc[(rc.razon >= 1) & ~rc.elemento.isin(core.HOSTS)] if not rc.empty else pd.DataFrame()
+    sin_m = rc[rc.min_ppm.isna() & (rc.percentil >= 90) & ~rc.elemento.isin(core.REE_IND) & ~rc.elemento.isin(core.HOSTS)] if not rc.empty else pd.DataFrame()
+    a_ = crit_min.groupby("grupo").elemento.agg(lambda s: ", ".join(sorted(core.etiqueta_elemento(x, usar_oxidos) for x in s))) if not crit_min.empty else pd.Series(dtype=str)
+    b_ = sin_m.groupby("grupo").elemento.agg(lambda s: ", ".join(sorted(core.etiqueta_elemento(x, usar_oxidos) for x in s))) if not sin_m.empty else pd.Series(dtype=str)
     co = res[["grupo", "estado", "n"]].set_index("grupo").join(paga.rename("Metales principales rentables")).join(a_.rename("Críticos >= ley de corte")).join(b_.rename("Críticos en P90 (sin corte)"))
     co = co.reset_index().rename(columns={"grupo": "Sitio · Tipo", "estado": "Estado"})
     st.dataframe(co, width="stretch", hide_index=True)
@@ -487,48 +506,58 @@ with t8:
 with t3:
     norma = st.radio("Marco normativo de referencia", ["NOM-147-SEMARNAT (México - Uso Industrial)", "Valores de Intervención (Referencia Europea)"], horizontal=True)
     col = "razon_mx" if norma.startswith("NOM") else "razon_eu"
-    a1, a2 = st.columns([3, 2])
-    with a1:
-        st.markdown(f'<div class="panel-hdr">Concentración media entre límite permisible ({norma})</div>', unsafe_allow_html=True)
-        st.plotly_chart(heat(rtox.pivot_table(index="grupo", columns="elemento", values=col), ESC_TOX, ""), width="stretch")
-    with a2:
-        st.markdown('<div class="panel-hdr">Principales excedencias ambientales por unidad</div>', unsafe_allow_html=True)
-        top = rtox.dropna(subset=[col]).sort_values(col, ascending=False).head(15)
-        top["etiqueta"] = top.elemento + " · " + top.grupo
-        fig = px.bar(top.iloc[::-1], x=col, y="etiqueta", orientation="h", color="elemento", height=480,
-                     labels={col: "Veces sobre el límite permisible", "etiqueta": ""})
-        fig.add_vline(x=1, line_dash="dash", line_color="#FFFFFF")
-        fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig, width="stretch")
+    if rtox.empty:
+        st.info("La base cargada no contiene elementos regulados por la normativa ambiental.")
+    else:
+        a1, a2 = st.columns([3, 2])
+        with a1:
+            st.markdown(f'<div class="panel-hdr">Concentración media entre límite permisible ({norma})</div>', unsafe_allow_html=True)
+            piv_tox = rtox.pivot_table(index="grupo", columns="elemento", values=col)
+            if not piv_tox.empty:
+                st.plotly_chart(heat(piv_tox, ESC_TOX, ""), width="stretch")
+        with a2:
+            st.markdown('<div class="panel-hdr">Principales excedencias ambientales por unidad</div>', unsafe_allow_html=True)
+            top = rtox.dropna(subset=[col]).sort_values(col, ascending=False).head(15)
+            top["etiqueta"] = top.elemento + " · " + top.grupo
+            fig = px.bar(top.iloc[::-1], x=col, y="etiqueta", orientation="h", color="elemento", height=480,
+                         labels={col: "Veces sobre el límite permisible", "etiqueta": ""})
+            fig.add_vline(x=1, line_dash="dash", line_color="#FFFFFF")
+            fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig, width="stretch")
 
 # ═══ 5. ANÁLISIS ESTADÍSTICO ═══
 with t4:
-    todas = [e for e in vals.columns if e != "REE"] + ["REE"]
-    e1, e2 = st.columns([1, 1])
-    el = e1.selectbox("Elemento", todas, index=todas.index("Pb") if "Pb" in todas else 0, key="el_dist")
-    col_by = e2.selectbox("Agrupar color por", ["tipo", "estado", "sitio"])
-    dd = meta_f.assign(valor=vals.loc[meta_f.index, el])
-    dd = dd[dd.valor > 0]
-    etiq_el = core.etiqueta_elemento(el, usar_oxidos)
-    st.markdown(f'<div class="panel-hdr">Distribución de frecuencias de {etiq_el} (mg/kg equivalente, escala logarítmica)</div>', unsafe_allow_html=True)
-    fig = px.histogram(dd, x="valor", color=col_by, log_x=True, nbins=45, marginal="box", barmode="overlay",
-                       opacity=0.75, height=400, labels={"valor": f"{etiq_el} (mg/kg)"})
-    if el in umb_actual:
-        fig.add_vline(x=core._min_ppm(el, umb_actual), line_dash="dash", line_color=GREEN, annotation_text="Ley de corte")
-    if el in core.UMB_TOXICOS:
-        for v, nm, colr in zip(core.UMB_TOXICOS[el], ["NOM-147", "Ref. UE"], [RED, AMBER]):
-            if not np.isnan(v):
-                fig.add_vline(x=v, line_dash="dot", line_color=colr, annotation_text=nm)
-    st.plotly_chart(fig, width="stretch")
-
-    st.markdown('<div class="panel-hdr">Matriz de correlación de Spearman (log10)</div>', unsafe_allow_html=True)
-    defecto = [e for e in ["Pb", "Zn", "Ag", "Cu", "As", "Cd", "Sb", "Fe", "Mn", "Ga", "Ge", "In", "U", "Al"] if e in vals]
-    sel = st.multiselect("Variables para correlación", todas, default=defecto)
-    if len(sel) >= 3:
-        X = vals.loc[meta_f.index, sel]
-        C = np.log10(X.where(X > 0)).rank().corr()
-        fig = px.imshow(C, zmin=-1, zmax=1, color_continuous_scale="RdBu_r", text_auto=".2f", height=520, aspect="auto")
+    todas = [e for e in vals.columns if e != "REE"] + (["REE"] if "REE" in vals.columns else [])
+    if not todas:
+        st.info("No se detectaron columnas numéricas de elementos químicos.")
+    else:
+        e1, e2 = st.columns([1, 1])
+        el = e1.selectbox("Elemento", todas, index=todas.index("Pb") if "Pb" in todas else 0, key="el_dist")
+        col_by = e2.selectbox("Agrupar color por", ["tipo", "estado", "sitio"])
+        dd = meta_f.assign(valor=vals.loc[meta_f.index, el])
+        dd = dd[dd.valor > 0]
+        etiq_el = core.etiqueta_elemento(el, usar_oxidos)
+        st.markdown(f'<div class="panel-hdr">Distribución de frecuencias de {etiq_el} (mg/kg equivalente, escala logarítmica)</div>', unsafe_allow_html=True)
+        fig = px.histogram(dd, x="valor", color=col_by, log_x=True, nbins=45, marginal="box", barmode="overlay",
+                           opacity=0.75, height=400, labels={"valor": f"{etiq_el} (mg/kg)"})
+        if el in umb_actual:
+            fig.add_vline(x=core._min_ppm(el, umb_actual), line_dash="dash", line_color=GREEN, annotation_text="Ley de corte")
+        if el in core.UMB_TOXICOS:
+            for v, nm, colr in zip(core.UMB_TOXICOS[el], ["NOM-147", "Ref. UE"], [RED, AMBER]):
+                if not np.isnan(v):
+                    fig.add_vline(x=v, line_dash="dot", line_color=colr, annotation_text=nm)
         st.plotly_chart(fig, width="stretch")
+
+        st.markdown('<div class="panel-hdr">Matriz de correlación de Spearman (log10)</div>', unsafe_allow_html=True)
+        defecto = [e for e in ["Pb", "Zn", "Ag", "Cu", "As", "Cd", "Sb", "Fe", "Mn", "Ga", "Ge", "In", "U", "Al"] if e in vals]
+        if len(defecto) < 3:
+            defecto = todas[:min(10, len(todas))]
+        sel = st.multiselect("Variables para correlación", todas, default=defecto)
+        if len(sel) >= 3:
+            X = vals.loc[meta_f.index, sel]
+            C = np.log10(X.where(X > 0)).rank().corr()
+            fig = px.imshow(C, zmin=-1, zmax=1, color_continuous_scale="RdBu_r", text_auto=".2f", height=520, aspect="auto")
+            st.plotly_chart(fig, width="stretch")
 
 # ═══ 6. ZONAS PRIORITARIAS ═══
 with t7:
@@ -561,16 +590,17 @@ with t5:
     st.markdown('<div class="panel-hdr">Porcentaje de Censura Analítica (% < Límite de Detección)</div>', unsafe_allow_html=True)
     idx = meta_f.index
     cols_drop = [c for c in ("REE", "PGE") if c in cens.columns]
-    pc_g = (cens.loc[idx].sum() / vals.loc[idx].notna().sum() * 100).drop(cols_drop).sort_values(ascending=False)
-    fig = px.bar(
-        pc_g,
-        color=np.where(pc_g > 20, "Descartar (>20 %)", np.where(pc_g > 13, "Advertencia (13-20 %)", "Aceptable (<=13 %)")),
-        color_discrete_map={"Aceptable (<=13 %)": GREEN, "Advertencia (13-20 %)": AMBER, "Descartar (>20 %)": RED},
-        height=350, labels={"value": "% < LD", "index": "", "color": "Criterio"}
-    )
-    fig.add_hline(y=13, line_dash="dot", line_color=AMBER)
-    fig.add_hline(y=20, line_dash="dot", line_color=RED)
-    st.plotly_chart(fig, width="stretch")
+    pc_g = (cens.loc[idx].sum() / vals.loc[idx].notna().sum().replace(0, np.nan) * 100).drop(cols_drop, errors="ignore").dropna().sort_values(ascending=False)
+    if not pc_g.empty:
+        fig = px.bar(
+            pc_g,
+            color=np.where(pc_g > 20, "Descartar (>20 %)", np.where(pc_g > 13, "Advertencia (13-20 %)", "Aceptable (<=13 %)")),
+            color_discrete_map={"Aceptable (<=13 %)": GREEN, "Advertencia (13-20 %)": AMBER, "Descartar (>20 %)": RED},
+            height=350, labels={"value": "% < LD", "index": "", "color": "Criterio"}
+        )
+        fig.add_hline(y=13, line_dash="dot", line_color=AMBER)
+        fig.add_hline(y=20, line_dash="dot", line_color=RED)
+        st.plotly_chart(fig, width="stretch")
 
     st.markdown('<div class="panel-hdr">Repetibilidad en Duplicados de Campo (-DPL): Diferencia Relativa Porcentual (RPD)</div>', unsafe_allow_html=True)
     pares = core.pares_dpl(meta, vals_raw, cens)
@@ -585,14 +615,12 @@ with t5:
 
 # ═══ 8. DATOS Y EXPORTACIÓN ═══
 with t6:
-    # Construcción de la matriz general y los umbrales por columna
-    mat_full = rmin.assign(col=rmin.etiqueta_elem + " (" + rmin.unidad + ")").pivot_table(index="grupo", columns="col", values="valor")
+    mat_full = rmin.assign(col=rmin.etiqueta_elem + " (" + rmin.unidad + ")").pivot_table(index="grupo", columns="col", values="valor") if not rmin.empty else pd.DataFrame()
     mapa_min_col = {
         f"{r.etiqueta_elem} ({r.unidad})": r.minimo
         for r in rmin[["etiqueta_elem", "unidad", "minimo"]].drop_duplicates().itertuples()
-    }
+    } if not rmin.empty else {}
 
-    # Identificación de columnas de interés (aquellas que existen y donde al menos un sitio alcanza >= ley de corte)
     cols_con_corte = [
         cn for cn in mat_full.columns
         if (mat_full[cn].notna().any()) and (mat_full[cn] >= mapa_min_col.get(cn, np.inf)).any()
@@ -626,7 +654,6 @@ with t6:
                 mask_filas |= (mat_dep[cn] >= mapa_min_col.get(cn, np.inf))
             mat_dep = mat_dep[mask_filas]
 
-        # Agregar metadatos clave de contexto (Estado, Municipio, n) al inicio de la matriz depurada
         meta_Idx = res.set_index("grupo")[["estado", "municipio", "n"]].rename(
             columns={"estado": "Estado", "municipio": "Municipio", "n": "Muestras (n)"}
         )
@@ -675,15 +702,16 @@ with t6:
 
     # ── 3. MATRIZ COMPLETA (SIN DEPURAR) Y RESUMEN EJECUTIVO ──
     with st.expander("Matriz completa de concentraciones medias convertidas (Todos los atributos · Verde >= Ley de Corte | Rojo < Ley de Corte)", expanded=False):
-        sty_full = mat_full.style
-        for cn in mat_full.columns:
-            u_min = mapa_min_col.get(cn, np.nan)
-            sty_full = sty_full.map(
-                lambda v, u=u_min: "background-color:#262A32;color:#78808C" if pd.isna(v) else
-                ("background-color:#194D28;color:#D4F7DC;font-weight:bold" if v >= u else "background-color:#4A1C1C;color:#FAD2D2"),
-                subset=[cn]
-            )
-        st.dataframe(sty_full.format("{:.3g}", na_rep="—"), width="stretch", height=480)
+        if not mat_full.empty:
+            sty_full = mat_full.style
+            for cn in mat_full.columns:
+                u_min = mapa_min_col.get(cn, np.nan)
+                sty_full = sty_full.map(
+                    lambda v, u=u_min: "background-color:#262A32;color:#78808C" if pd.isna(v) else
+                    ("background-color:#194D28;color:#D4F7DC;font-weight:bold" if v >= u else "background-color:#4A1C1C;color:#FAD2D2"),
+                    subset=[cn]
+                )
+            st.dataframe(sty_full.format("{:.3g}", na_rep="—"), width="stretch", height=480)
 
     with st.expander("Resumen Ejecutivo por Sitio y Tipo de Depósito (Económico y Ambiental)", expanded=False):
         cols = ["grupo", "estado", "municipio", "n", "pinta_lbl", "elementos_rentables", "nivel_tox", "excede_mx", "excede_eu"]
@@ -704,10 +732,13 @@ with t6:
         if not mat_dep_vista.empty:
             mat_dep_vista.reset_index().to_excel(xw, sheet_name="Matriz_Final_Depurada", index=False)
         df_ref_cortes.to_excel(xw, sheet_name="Valores_Minimos_Minables", index=False)
-        mat_full.reset_index().to_excel(xw, sheet_name="Matriz_Completa_Medias", index=False)
+        if not mat_full.empty:
+            mat_full.reset_index().to_excel(xw, sheet_name="Matriz_Completa_Medias", index=False)
         tabla.to_excel(xw, sheet_name="Resumen_Ejecutivo", index=False)
-        rmin.drop(columns=["gm_u", "media_u", "p1_u", "p2_u", "maximo_u"], errors="ignore").to_excel(xw, sheet_name="Evaluacion_Economica", index=False)
-        rtox.to_excel(xw, sheet_name="Evaluacion_Ambiental", index=False)
+        if not rmin.empty:
+            rmin.drop(columns=["gm_u", "media_u", "p1_u", "p2_u", "maximo_u"], errors="ignore").to_excel(xw, sheet_name="Evaluacion_Economica", index=False)
+        if not rtox.empty:
+            rtox.to_excel(xw, sheet_name="Evaluacion_Ambiental", index=False)
 
     d1, d2, d3 = st.columns(3)
     if not mat_dep_vista.empty:
